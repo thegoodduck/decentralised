@@ -30,6 +30,13 @@ export class WebSocketService {
   private static statusListeners: Set<(status: { connected: boolean; peerCount: number }) => void> = new Set();
   private static knownServers: Map<string, KnownServer> = new Map();
 
+  // Presence tracking: postId -> Set of authorIds currently viewing
+  private static postPresence: Map<string, Set<string>> = new Map();
+  private static presenceListeners: Set<() => void> = new Set();
+  private static currentPostId: string | null = null;
+  private static currentAuthorId: string | null = null;
+  private static presenceInterval: ReturnType<typeof setInterval> | null = null;
+
   static initialize() {
     this.loadKnownServers();
     this.connect();
@@ -138,6 +145,25 @@ export class WebSocketService {
       this.subscribe('server-list', (data: any) => {
         if (data?.servers && Array.isArray(data.servers)) {
           this.mergeServerList(data.servers, data.peerId || 'unknown');
+        }
+      });
+
+      // Listen for presence heartbeats from other peers
+      this.subscribe('post-presence', (data: any) => {
+        if (data?.postId && data?.authorId && data.peerId !== this.peerId) {
+          if (!this.postPresence.has(data.postId)) {
+            this.postPresence.set(data.postId, new Set());
+          }
+          this.postPresence.get(data.postId)!.add(data.authorId);
+          this.notifyPresenceListeners();
+        }
+      });
+
+      // Listen for presence leave
+      this.subscribe('post-presence-leave', (data: any) => {
+        if (data?.postId && data?.authorId) {
+          this.postPresence.get(data.postId)?.delete(data.authorId);
+          this.notifyPresenceListeners();
         }
       });
     } catch (_error) {
@@ -283,6 +309,7 @@ export class WebSocketService {
   }
 
   static cleanup() {
+    this.leavePost();
     if (this.ws) {
       this.ws.close();
       this.ws = null;
@@ -292,6 +319,99 @@ export class WebSocketService {
     this.peers.clear();
     this.peerAddresses.clear();
     this.statusListeners.clear();
+    this.postPresence.clear();
+    this.presenceListeners.clear();
+  }
+
+  // ─── Post Presence ─────────────────────────────────────────────────────────
+
+  /**
+   * Start broadcasting presence on a post. Call when the user opens a post.
+   */
+  static joinPost(postId: string, authorId: string) {
+    // Leave previous post if any
+    if (this.currentPostId && this.currentPostId !== postId) {
+      this.leavePost();
+    }
+
+    this.currentPostId = postId;
+    this.currentAuthorId = authorId;
+
+    // Add self to presence
+    if (!this.postPresence.has(postId)) {
+      this.postPresence.set(postId, new Set());
+    }
+    this.postPresence.get(postId)!.add(authorId);
+    this.notifyPresenceListeners();
+
+    // Send initial presence
+    this.broadcast('post-presence', {
+      postId,
+      authorId,
+      peerId: this.peerId,
+    });
+
+    // Heartbeat every 15s
+    this.presenceInterval = setInterval(() => {
+      if (this.currentPostId === postId) {
+        this.broadcast('post-presence', {
+          postId,
+          authorId,
+          peerId: this.peerId,
+        });
+      }
+    }, 15_000);
+  }
+
+  /**
+   * Stop broadcasting presence. Call when the user leaves a post.
+   */
+  static leavePost() {
+    if (this.presenceInterval) {
+      clearInterval(this.presenceInterval);
+      this.presenceInterval = null;
+    }
+
+    if (this.currentPostId && this.currentAuthorId) {
+      this.broadcast('post-presence-leave', {
+        postId: this.currentPostId,
+        authorId: this.currentAuthorId,
+        peerId: this.peerId,
+      });
+
+      this.postPresence.get(this.currentPostId)?.delete(this.currentAuthorId);
+      this.notifyPresenceListeners();
+    }
+
+    this.currentPostId = null;
+    this.currentAuthorId = null;
+  }
+
+  /**
+   * Check if a given author is currently present on a post.
+   */
+  static isAuthorOnline(postId: string, authorId: string): boolean {
+    return this.postPresence.get(postId)?.has(authorId) ?? false;
+  }
+
+  /**
+   * Subscribe to presence changes. Returns an unsubscribe function.
+   */
+  static onPresenceChange(callback: () => void): () => void {
+    this.presenceListeners.add(callback);
+    return () => {
+      this.presenceListeners.delete(callback);
+    };
+  }
+
+  private static notifyPresenceListeners() {
+    this.presenceListeners.forEach((listener) => {
+      try {
+        listener();
+      } catch {
+        // Ignore listener errors
+      }
+    });
   }
 
   private static notifyStatus() {

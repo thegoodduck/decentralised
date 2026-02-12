@@ -117,6 +117,17 @@ export class PollService {
     await this.putPromise(communityPolls.get(pollId), gunPoll);
     await this.putPromise(communityPolls.get(pollId).get('options'), optionsMap);
 
+    // Also store each option individually so GUN doesn't lose data in references
+    for (let i = 0; i < pollOptions.length; i++) {
+      const opt = pollOptions[i];
+      const mainOptNode = this.getPollPath(pollId).get('options').get(String(i));
+      const commOptNode = communityPolls.get(pollId).get('options').get(String(i));
+      await Promise.all([
+        this.putPromise(mainOptNode, { id: opt.id, text: opt.text, votes: 0 }),
+        this.putPromise(commOptNode, { id: opt.id, text: opt.text, votes: 0 }),
+      ]);
+    }
+
     // ─────────────────────────────────────────────
     // Private poll invite codes (one-vote-per-code)
     // ─────────────────────────────────────────────
@@ -433,30 +444,40 @@ export class PollService {
   }
 
   private static async getOptions(node: any): Promise<PollOption[] | null> {
-    const data = await new Promise<any>((r) => node.once((v: any) => r(v)));
+    // Use map().once() to let GUN resolve references automatically,
+    // which is more reliable than reading the parent node in one shot.
+    return new Promise<PollOption[] | null>((resolve) => {
+      const optionsById: Map<string, PollOption> = new Map();
+      let settled = false;
 
-    if (!data || typeof data !== 'object') return null;
+      node.map().once((val: any, key: string) => {
+        if (settled || !val || key.startsWith('_')) return;
 
-    const keys = Object.keys(data)
-      .filter((k) => !k.startsWith('_'))
-      .sort((a, b) => Number(a) - Number(b));
+        const opt: PollOption = {
+          id: val.id ?? '',
+          text: val.text ?? '',
+          votes: val.votes ?? 0,
+          voters: [],
+        };
 
-    if (keys.length === 0) return [];
+        optionsById.set(key, opt);
+      });
 
-    const options: PollOption[] = [];
+      // GUN is eventually consistent — allow time for all options to arrive
+      setTimeout(() => {
+        settled = true;
+        if (optionsById.size === 0) {
+          resolve(null);
+          return;
+        }
 
-    for (const k of keys) {
-      const val = data[k];
-      if (val?.['#']) {
-        // rare case — reference — usually not needed in your current schema
-        const refData = await new Promise<any>((r) => this.gun.get(val['#']).once(r));
-        options.push({ id: refData?.id ?? '', text: refData?.text ?? '', votes: refData?.votes ?? 0, voters: [] });
-      } else {
-        options.push({ id: val?.id ?? '', text: val?.text ?? '', votes: val?.votes ?? 0, voters: [] });
-      }
-    }
+        const sorted = Array.from(optionsById.entries())
+          .sort((a, b) => Number(a[0]) - Number(b[0]))
+          .map(([, opt]) => opt);
 
-    return options;
+        resolve(sorted);
+      }, 600);
+    });
   }
 
   private static mapPollMetadata(data: any, communityId: string): Omit<Poll, 'options' | 'isExpired'> {

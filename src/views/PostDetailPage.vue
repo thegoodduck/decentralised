@@ -94,7 +94,7 @@
           <ion-card-content>
             <div class="commenters-list">
               <div v-for="commenter in uniqueCommenters" :key="commenter.authorId" class="commenter-chip">
-                <span class="commenter-online-dot"></span>
+                <span class="commenter-online-dot" :class="{ offline: !commenter.isOnline }"></span>
                 <span class="commenter-name">u/{{ commenter.displayName }}</span>
                 <ion-badge color="medium" class="commenter-count">{{ commenter.commentCount }}</ion-badge>
               </div>
@@ -157,7 +157,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, watch } from 'vue';
+import { ref, computed, onMounted, onUnmounted, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import {
   IonPage,
@@ -198,6 +198,7 @@ import { useCommunityStore } from '../stores/communityStore';
 import { useUserStore } from '../stores/userStore';
 import CommentCard from '../components/CommentCard.vue';
 import { Post } from '../services/postService';
+import { WebSocketService } from '../services/websocketService';
 import { generatePseudonym } from '../utils/pseudonym';
 
 const route = useRoute();
@@ -211,6 +212,8 @@ const post = ref<Post | null>(null);
 const isLoading = ref(true);
 const newCommentText = ref('');
 const voteVersion = ref(0);
+const presenceVersion = ref(0);
+let unsubPresence: (() => void) | null = null;
 
 const postId = computed(() => route.params.postId as string);
 const communityId = computed(() => route.params.communityId as string);
@@ -255,7 +258,8 @@ const sortedComments = computed(() => {
 });
 
 const uniqueCommenters = computed(() => {
-  const authorMap = new Map<string, { authorId: string; displayName: string; commentCount: number }>();
+  presenceVersion.value; // reactive dependency for presence updates
+  const authorMap = new Map<string, { authorId: string; displayName: string; commentCount: number; isOnline: boolean }>();
 
   commentStore.comments
     .filter(c => c.postId === postId.value || c.postId === post.value?.id)
@@ -268,6 +272,7 @@ const uniqueCommenters = computed(() => {
           authorId: c.authorId,
           displayName: c.authorId && postId.value ? generatePseudonym(postId.value, c.authorId) : (c.authorName || 'anon'),
           commentCount: 1,
+          isOnline: WebSocketService.isAuthorOnline(postId.value || post.value?.id || '', c.authorId),
         });
       }
     });
@@ -560,6 +565,30 @@ async function refreshPost() {
 
 onMounted(async () => {
   await loadPost();
+
+  // Join post presence for online status tracking
+  const userStr = localStorage.getItem('currentUser');
+  if (userStr && post.value) {
+    try {
+      const user = JSON.parse(userStr);
+      WebSocketService.joinPost(post.value.id, user.id);
+    } catch {
+      // Invalid user data
+    }
+  }
+
+  // Subscribe to presence changes
+  unsubPresence = WebSocketService.onPresenceChange(() => {
+    presenceVersion.value++;
+  });
+});
+
+onUnmounted(() => {
+  WebSocketService.leavePost();
+  if (unsubPresence) {
+    unsubPresence();
+    unsubPresence = null;
+  }
 });
 </script>
 
@@ -765,6 +794,12 @@ onMounted(async () => {
   background: var(--ion-color-success);
   flex-shrink: 0;
   box-shadow: 0 0 4px rgba(var(--ion-color-success-rgb), 0.5);
+  transition: background 0.3s, box-shadow 0.3s;
+}
+
+.commenter-online-dot.offline {
+  background: var(--ion-color-medium);
+  box-shadow: none;
 }
 
 .commenter-name {

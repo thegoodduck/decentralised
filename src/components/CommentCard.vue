@@ -3,7 +3,7 @@
     <!-- Comment Header -->
     <div class="comment-header">
       <span class="author-badge">
-        <span class="commenter-dot"></span>
+        <span class="commenter-dot" :class="{ offline: !isOnline }"></span>
         <span class="author-name">u/{{ displayName }}</span>
       </span>
       <span class="separator">•</span>
@@ -91,7 +91,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed } from 'vue';
+import { ref, computed, onMounted, onUnmounted } from 'vue';
 import { IonIcon, IonTextarea, IonButton, toastController } from '@ionic/vue';
 import {
   arrowUpOutline,
@@ -102,6 +102,7 @@ import {
 } from 'ionicons/icons';
 import { useCommentStore } from '../stores/commentStore';
 import { Comment } from '../services/commentService';
+import { WebSocketService } from '../services/websocketService';
 import { generatePseudonym } from '../utils/pseudonym';
 
 const props = defineProps<{
@@ -115,6 +116,26 @@ defineEmits(['upvote', 'downvote']);
 const commentStore = useCommentStore();
 const showReplyForm = ref(false);
 const replyText = ref('');
+const presenceVersion = ref(0);
+let unsubPresence: (() => void) | null = null;
+
+onMounted(() => {
+  unsubPresence = WebSocketService.onPresenceChange(() => {
+    presenceVersion.value++;
+  });
+});
+
+onUnmounted(() => {
+  if (unsubPresence) {
+    unsubPresence();
+    unsubPresence = null;
+  }
+});
+
+const isOnline = computed(() => {
+  presenceVersion.value; // reactive dependency
+  return WebSocketService.isAuthorOnline(props.postId, props.comment.authorId);
+});
 
 const displayName = computed(() => {
   if (props.comment?.authorId && props.postId) {
@@ -260,6 +281,12 @@ function formatNumber(num: number | undefined | null): string {
   background: var(--ion-color-success);
   flex-shrink: 0;
   box-shadow: 0 0 6px rgba(var(--ion-color-success-rgb), 0.5);
+  transition: background 0.3s, box-shadow 0.3s;
+}
+
+.commenter-dot.offline {
+  background: var(--ion-color-medium);
+  box-shadow: none;
 }
 
 .comment-author {
