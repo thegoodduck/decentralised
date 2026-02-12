@@ -3,6 +3,7 @@ import { defineStore } from 'pinia';
 import { ref } from 'vue';
 import { Comment, CommentService } from '../services/commentService';
 import { generatePseudonym } from '../utils/pseudonym';
+import { RateLimitService } from '../services/rateLimitService';
 
 // Helper function to get current user
 function getCurrentUser() {
@@ -105,6 +106,12 @@ export const useCommentStore = defineStore('comment', () => {
     parentId?: string;
   }) {
     try {
+      // Rate limit check
+      const remaining = RateLimitService.getRemainingCooldown('comment');
+      if (remaining > 0) {
+        throw new Error(`Please wait ${RateLimitService.formatRemaining(remaining)} before commenting again`);
+      }
+
       // Validate required fields
       if (!data.postId) {
         throw new Error('postId is required but was empty or undefined');
@@ -135,7 +142,10 @@ export const useCommentStore = defineStore('comment', () => {
       if (!exists) {
         comments.value.unshift(comment);
       }
-      
+
+      // Record rate limit
+      RateLimitService.recordAction('comment');
+
       return comment;
     } catch (error) {
       console.error('Error creating comment:', error);

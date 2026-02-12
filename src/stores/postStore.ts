@@ -6,6 +6,7 @@ import { UserService } from '../services/userService';
 import { EventService } from '../services/eventService';
 import { BroadcastService } from '../services/broadcastService';
 import { WebSocketService } from '../services/websocketService';
+import { RateLimitService } from '../services/rateLimitService';
 import { useChainStore } from './chainStore';
 
 export const usePostStore = defineStore('post', () => {
@@ -96,6 +97,12 @@ export const usePostStore = defineStore('post', () => {
     imageFile?: File;
   }) {
     try {
+      // Rate limit check
+      const remaining = RateLimitService.getRemainingCooldown('post');
+      if (remaining > 0) {
+        throw new Error(`Please wait ${RateLimitService.formatRemaining(remaining)} before posting again`);
+      }
+
       const currentUser = await UserService.getCurrentUser();
       
       const post = await PostService.createPost({
@@ -139,6 +146,9 @@ export const usePostStore = defineStore('post', () => {
       } catch (err) {
         console.warn('Failed to create signed post event:', err);
       }
+
+      // Record rate limit
+      RateLimitService.recordAction('post');
 
       return post;
     } catch (error) {
